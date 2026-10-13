@@ -27,12 +27,12 @@ CALLBELL_CHANNEL_UUID = os.environ.get("CALLBELL_CHANNEL_UUID", "")
 CALLBELL_WEBHOOK_SECRET = os.environ.get("CALLBELL_WEBHOOK_SECRET", "")
 HUMANO_EMAIL = os.environ.get("HUMANO_EMAIL", "")  # correo del asesor en Callbell
 MODELO = os.environ.get("MODELO", "claude-opus-5-5")
-HORA_INICIO = int(os.environ.get("HORA_INICIO", "8"))
-HORA_FIN = int(os.environ.get("HORA_FIN", "18"))
+HORA_INICIO = int(os.environ.get("HORA_INICIO", "7"))
+HORA_FIN = int(os.environ.get("HORA_FIN", "22"))
 # Minutos que el bot se calla cuando un asesor escribe a mano; luego manda un mensaje de seguimiento
 PAUSA_ASESOR_MIN = float(os.environ.get("PAUSA_ASESOR_MIN", "3"))
 # Minutos que el bot se calla después de pasarle el chat a un asesor
-PAUSA_TRASPASO_MIN = float(os.environ.get("PAUSA_TRASPASO_MIN", "10"))
+PAUSA_TRASPASO_MIN = float(os.environ.get("PAUSA_TRASPASO_MIN", "3"))
 # Lista opcional de celulares permitidos, separados por coma (con código de país). Vacío = cualquiera.
 NUMEROS_PERMITIDOS = {
     "".join(c for c in n if c.isdigit())
