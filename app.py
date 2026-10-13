@@ -25,7 +25,6 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CALLBELL_API_KEY = os.environ.get("CALLBELL_API_KEY", "")
 CALLBELL_CHANNEL_UUID = os.environ.get("CALLBELL_CHANNEL_UUID", "")
 CALLBELL_WEBHOOK_SECRET = os.environ.get("CALLBELL_WEBHOOK_SECRET", "")
-HUMANO_EMAIL = os.environ.get("HUMANO_EMAIL", "")  # correo del asesor en Callbell
 MODELO = os.environ.get("MODELO", "claude-opus-5-5")
 HORA_INICIO = int(os.environ.get("HORA_INICIO", "7"))
 HORA_FIN = int(os.environ.get("HORA_FIN", "22"))
