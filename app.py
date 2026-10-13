@@ -29,7 +29,19 @@ HUMANO_EMAIL = os.environ.get("HUMANO_EMAIL", "")  # correo del asesor en Callbe
 MODELO = os.environ.get("MODELO", "claude-opus-5-5")
 HORA_INICIO = int(os.environ.get("HORA_INICIO", "8"))
 HORA_FIN = int(os.environ.get("HORA_FIN", "18"))
-PAUSA_HORAS = float(os.environ.get("PAUSA_HORAS", "12"))  # silencio del bot tras pasar a humano
+# Minutos que el bot se calla cuando un asesor escribe a mano; luego manda un mensaje de seguimiento
+PAUSA_ASESOR_MIN = float(os.environ.get("PAUSA_ASESOR_MIN", "3"))
+# Minutos que el bot se calla después de pasarle el chat a un asesor
+PAUSA_TRASPASO_MIN = float(os.environ.get("PAUSA_TRASPASO_MIN", "10"))
+# Lista opcional de celulares permitidos, separados por coma (con código de país). Vacío = cualquiera.
+NUMEROS_PERMITIDOS = {
+    "".join(c for c in n if c.isdigit())
+    for n in os.environ.get("NUMEROS_PERMITIDOS", "").split(",") if n.strip()
+}
+MENSAJE_SEGUIMIENTO = os.environ.get(
+    "MENSAJE_SEGUIMIENTO",
+    "Hola, ¿sigues por aquí? Si te interesa continuar con la conversación, con gusto te seguimos atendiendo.",
+)
 ETIQUETA_SILENCIO = os.environ.get("ETIQUETA_SILENCIO", "humano").lower()
 
 CALLBELL_URL = "https://api.callbell.eu/v1"
@@ -66,6 +78,9 @@ claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 # --- Estado en memoria (se reinicia si el servidor se reinicia) ---
 historiales = defaultdict(lambda: deque(maxlen=MAX_HISTORIAL))
 pausados = {}  # contacto -> hora (epoch) hasta la que el bot no responde
+modo_pausa = {}  # contacto -> "asesor" (escribió a mano) o "traspaso" (el bot pasó el chat)
+ultimo_cliente = {}  # contacto -> hora (epoch) del último mensaje del cliente
+seguimientos = {}  # contacto -> marca del seguimiento programado
 enviados_por_bot = defaultdict(lambda: deque(maxlen=20))  # textos que mandó el bot
 procesados = deque(maxlen=1000)  # evita responder dos veces el mismo mensaje
 candados = defaultdict(threading.Lock)
@@ -108,6 +123,17 @@ def enviar_whatsapp(telefono: str, texto: str, asignar: bool = False) -> None:
         json=cuerpo,
         timeout=20,
     )
+    if r.status_code == 400 and "assigned_user" in r.text:
+        # El correo de HUMANO_EMAIL no existe en Callbell: enviar igual, sin asignar, para no dejar al cliente sin respuesta
+        log("error_asignacion", detalle="HUMANO_EMAIL no existe en la cuenta de Callbell")
+        cuerpo.pop("assigned_user", None)
+        r = requests.post(
+            f"{CALLBELL_URL}/messages/send",
+            headers={"Authorization": f"Bearer {CALLBELL_API_KEY}"},
+            json=cuerpo,
+            timeout=20,
+        )
+    log("callbell_respuesta", estado=r.status_code, detalle=r.text[:200])
     if r.status_code >= 300:
         log("error_callbell", estado=r.status_code, detalle=r.text[:300])
     r.raise_for_status()
@@ -178,6 +204,14 @@ def atender(payload: dict) -> None:
     telefono = payload.get("from", "")
     texto = (payload.get("text") or "").strip()
 
+    if NUMEROS_PERMITIDOS:
+        digitos = "".join(c for c in telefono if c.isdigit())
+        if digitos not in NUMEROS_PERMITIDOS:
+            log("numero_no_permitido", telefono_fin=digitos[-4:])
+            return
+
+    ultimo_cliente[contacto] = time.time()
+
     with candados[contacto]:
         if pausados.get(contacto, 0) > time.time():
             log("bot_en_pausa", contacto=contacto)
@@ -211,20 +245,57 @@ def atender(payload: dict) -> None:
             return
 
         if pasar:
-            pausados[contacto] = time.time() + PAUSA_HORAS * 3600
+            pausados[contacto] = time.time() + PAUSA_TRASPASO_MIN * 60
+            modo_pausa[contacto] = "traspaso"
             log("pasado_a_humano", contacto=contacto, motivo=datos.get("motivo", ""),
                 conversacion=contacto_info.get("conversationHref", ""))
         else:
             log("respondido", contacto=contacto)
 
 
+def programar_seguimiento(contacto: str, telefono: str) -> None:
+    """Pasado el tiempo de pausa, si el cliente no ha vuelto a escribir, el bot le pregunta si sigue interesado."""
+    marca = time.time()
+    seguimientos[contacto] = marca
+
+    def revisar() -> None:
+        with candados[contacto]:
+            if seguimientos.get(contacto) != marca:
+                return  # el asesor escribió de nuevo y reinició el conteo
+            if modo_pausa.get(contacto) != "asesor":
+                return
+            if ultimo_cliente.get(contacto, 0) > marca:
+                return  # el cliente ya escribió; el bot retoma con su próximo mensaje
+            enviados_por_bot[contacto].append(MENSAJE_SEGUIMIENTO)
+            historiales[contacto].append({"role": "assistant", "content": MENSAJE_SEGUIMIENTO})
+            try:
+                enviar_whatsapp(telefono, MENSAJE_SEGUIMIENTO)
+                log("seguimiento_enviado", contacto=contacto)
+            except Exception as e:
+                log("error_seguimiento", contacto=contacto, tipo=type(e).__name__)
+
+    temporizador = threading.Timer(PAUSA_ASESOR_MIN * 60, revisar)
+    temporizador.daemon = True
+    temporizador.start()
+
+
 def registrar_mensaje_saliente(payload: dict) -> None:
-    """Si un asesor escribe a mano en Callbell, el bot se calla en ese chat."""
+    """Si un asesor escribe a mano en Callbell, el bot se calla un rato en ese chat."""
     contacto = (payload.get("contact") or {}).get("uuid") or payload.get("to", "")
+    telefono = payload.get("to", "")
     texto = (payload.get("text") or "").strip()
-    if texto and texto not in enviados_por_bot[contacto]:
-        pausados[contacto] = time.time() + PAUSA_HORAS * 3600
-        log("asesor_tomo_el_chat", contacto=contacto)
+    if not texto or texto in enviados_por_bot[contacto]:
+        return
+    ahora = time.time()
+    if modo_pausa.get(contacto) == "traspaso" and pausados.get(contacto, 0) > ahora:
+        # el chat ya estaba con un asesor: el bot vuelve PAUSA_TRASPASO_MIN después de su último mensaje
+        pausados[contacto] = ahora + PAUSA_TRASPASO_MIN * 60
+        log("asesor_escribio_tras_traspaso", contacto=contacto)
+        return
+    pausados[contacto] = ahora + PAUSA_ASESOR_MIN * 60
+    modo_pausa[contacto] = "asesor"
+    log("asesor_tomo_el_chat", contacto=contacto)
+    programar_seguimiento(contacto, telefono)
 
 
 @app.get("/")
